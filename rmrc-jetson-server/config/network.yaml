@@ -1,0 +1,8 @@
+# Network configuration for RMRC Jetson Server
+# ZeroMQ ports and IP addresses
+
+# LiDAR point cloud streaming port (PUB)
+lidar_port: 5556
+
+# Optional: bind interface (use * for all interfaces, or specific IP)
+bind_interface: "*"

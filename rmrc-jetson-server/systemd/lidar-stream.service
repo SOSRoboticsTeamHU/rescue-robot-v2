@@ -1,0 +1,25 @@
+[Unit]
+Description=LiDAR Stream Node (ROS2 to ZeroMQ)
+After=network-online.target unilidar-driver.service
+Wants=network-online.target
+Requires=unilidar-driver.service
+
+[Service]
+Type=simple
+User=sosrobo
+Group=dialout
+WorkingDirectory=/home/sosrobo/rmrc-jetson-server
+Environment="HOME=/home/sosrobo"
+# ROS2 workspace setup + Python path
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && source ~/rmrc_ws/install/setup.bash && cd /home/sosrobo/rmrc-jetson-server && python3 src/sensing/lidar_stream.py'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lidar-stream
+
+# USB permissions (dialout group)
+SupplementaryGroups=dialout
+
+[Install]
+WantedBy=multi-user.target
