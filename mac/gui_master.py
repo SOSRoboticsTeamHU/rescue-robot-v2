@@ -11,15 +11,14 @@ from typing import Dict, List, Optional
 from collections import deque
 from pathlib import Path
 
-import PyQt6.QtCore as QtCore
+from PyQt6 import QtCore
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QTextEdit, QPushButton, QFrame
+    QLabel, QTextEdit, QPushButton, QFrame, QSplashScreen
 )
 from PyQt6.QtGui import QFont, QColor, QPalette, QPixmap, QPainter, QIcon
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtOpenGL import QOpenGLContext
 
 try:
     import zmq
@@ -213,7 +212,7 @@ class DecisionFeed(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
-        self.setMaximumBlockCount(1000)  # Keep last 1000 entries
+        self.document().setMaximumBlockCount(1000)  # Keep last 1000 entries
         self.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {COLORS["bg_dark"].name()};
@@ -255,6 +254,8 @@ class ZMQReceiverThread(QThread):
     arm_position_received = pyqtSignal(object)  # ArmPosition
     emergency_received = pyqtSignal(str)  # reason
     heartbeat_received = pyqtSignal(float)  # timestamp
+    connection_lost = pyqtSignal()  # Connection lost signal
+    connection_restored = pyqtSignal()  # Connection restored signal
     
     def __init__(self, port: int = ZMQ_PUB_PORT, mock_mode: bool = False):
         super().__init__()
@@ -278,6 +279,7 @@ class ZMQReceiverThread(QThread):
             
             self.running = True
             last_heartbeat = time.time()
+            connection_lost_flag = False
             
             while self.running:
                 try:
@@ -287,10 +289,16 @@ class ZMQReceiverThread(QThread):
                         msg = ZMQMessage.deserialize(raw_msg)
                         self.process_message(msg)
                         if msg.msg_type == MessageType.HEARTBEAT:
+                            if connection_lost_flag:
+                                self.connection_restored.emit()
+                                connection_lost_flag = False
                             last_heartbeat = time.time()
                     else:
                         # Check for heartbeat timeout
                         if time.time() - last_heartbeat > HEARTBEAT_TIMEOUT:
+                            if not connection_lost_flag:
+                                self.connection_lost.emit()
+                                connection_lost_flag = True
                             self.emergency_received.emit("Heartbeat timeout - connection lost")
                             last_heartbeat = time.time()  # Reset to prevent spam
                             
@@ -381,6 +389,77 @@ class ZMQReceiverThread(QThread):
         self.running = False
 
 
+class ConnectionSplash(QWidget):
+    """Connection splash screen overlay"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+    def paintEvent(self, event):
+        """Draw splash screen"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Semi-transparent background
+        painter.fillRect(self.rect(), QColor(10, 12, 18, 230))
+        
+        # Message
+        painter.setPen(COLORS["accent_green"])
+        font = QFont("Courier New", 24, QFont.Weight.Bold)
+        painter.setFont(font)
+        
+        text = "CONNECTING TO ROBOT..."
+        text_rect = self.rect()
+        painter.drawText(text_rect, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+        
+        # Subtitle
+        painter.setPen(COLORS["text_secondary"])
+        font.setPointSize(12)
+        painter.setFont(font)
+        painter.drawText(text_rect.adjusted(0, 40, 0, 0), QtCore.Qt.AlignmentFlag.AlignCenter, "Waiting for heartbeat...")
+
+
+class ConnectionLostOverlay(QWidget):
+    """Connection lost overlay"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint | QtCore.Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.hide()
+        
+    def paintEvent(self, event):
+        """Draw connection lost overlay"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Red overlay
+        painter.fillRect(self.rect(), QColor(255, 50, 50, 100))
+        
+        # Warning border
+        painter.setPen(QColor(255, 50, 50, 255))
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        border_width = 5
+        painter.drawRect(self.rect().adjusted(border_width, border_width, -border_width, -border_width))
+        
+        # Message
+        painter.setPen(COLORS["accent_red"])
+        font = QFont("Courier New", 32, QFont.Weight.Bold)
+        painter.setFont(font)
+        
+        text = "CONNECTION LOST"
+        text_rect = self.rect()
+        painter.drawText(text_rect, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+        
+        # Subtitle
+        painter.setPen(COLORS["text_primary"])
+        font.setPointSize(16)
+        painter.setFont(font)
+        painter.drawText(text_rect.adjusted(0, 50, 0, 0), QtCore.Qt.AlignmentFlag.AlignCenter, "Waiting for reconnection...")
+
+
 class MainWindow(QMainWindow):
     """Main GUI Window"""
     
@@ -391,6 +470,10 @@ class MainWindow(QMainWindow):
         self.mission_timer = QTimer()
         self.mission_timer.timeout.connect(self.update_mission_timer)
         
+        # Connection state
+        self.connected = False
+        self.first_heartbeat = False
+        
         # ZMQ receiver thread
         self.zmq_thread = ZMQReceiverThread(mock_mode=mock_mode)
         self.zmq_thread.telemetry_received.connect(self.update_telemetry)
@@ -398,6 +481,9 @@ class MainWindow(QMainWindow):
         self.zmq_thread.sensor_state_received.connect(self.update_sensor_states)
         self.zmq_thread.arm_position_received.connect(self.update_arm_position)
         self.zmq_thread.emergency_received.connect(self.handle_emergency)
+        self.zmq_thread.heartbeat_received.connect(self.on_heartbeat)
+        self.zmq_thread.connection_lost.connect(self.on_connection_lost)
+        self.zmq_thread.connection_restored.connect(self.on_connection_restored)
         
         self.init_ui()
         
@@ -429,13 +515,46 @@ class MainWindow(QMainWindow):
         right_panel = self.create_right_panel()
         main_layout.addWidget(right_panel, 1)
         
+        # Connection splash screen (only if not in mock mode)
+        if not self.mock_mode:
+            self.connection_splash = ConnectionSplash(self)
+            self.connection_splash.setGeometry(self.rect())
+            self.connection_splash.show()
+        
+        # Connection lost overlay
+        self.connection_lost_overlay = ConnectionLostOverlay(self)
+        
         # Start ZMQ receiver
         self.zmq_thread.start()
+        
+        # Hide splash after first heartbeat (with delay for mock mode)
+        if self.mock_mode:
+            # In mock mode, auto-hide splash after short delay
+            QTimer.singleShot(2000, self.hide_connection_splash)
         
     def create_left_panel(self) -> QWidget:
         """Create left panel with telemetry gauges and status indicators"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        
+        # Logo placeholder (top-left)
+        logo_container = QWidget()
+        logo_layout = QHBoxLayout(logo_container)
+        logo_label = QLabel()
+        logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
+        
+        if logo_path.exists():
+            pixmap = QPixmap(str(logo_path))
+            scaled_pixmap = pixmap.scaled(120, 80, QtCore.Qt.AspectRatioMode.KeepAspectRatio, QtCore.Qt.TransformationMode.SmoothTransformation)
+            logo_label.setPixmap(scaled_pixmap)
+        else:
+            logo_label.setText("TEAM LOGO")
+            logo_label.setStyleSheet(f"color: {COLORS['text_secondary'].name()}; font-size: 10pt;")
+        
+        logo_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        logo_layout.addWidget(logo_label)
+        logo_layout.addStretch()
+        layout.addWidget(logo_container)
         
         # Title
         title = QLabel("TELEMETRY HUD")
@@ -458,9 +577,15 @@ class MainWindow(QMainWindow):
         gauges_layout2.addWidget(self.mem_gauge)
         layout.addLayout(gauges_layout2)
         
+        # LiDAR frequency display
+        lidar_freq_label = QLabel("LiDAR Frequency: -- Hz")
+        lidar_freq_label.setStyleSheet(f"color: {COLORS['accent_blue'].name()}; font-size: 11pt; font-family: monospace;")
+        self.lidar_freq_label = lidar_freq_label
+        layout.addWidget(lidar_freq_label)
+        
         # Status indicators
         status_title = QLabel("SENSOR STATUS")
-        status_title.setStyleSheet(f"color: {COLORS['accent_blue'].name()}; font-size: 12pt; margin-top: 20px;")
+        status_title.setStyleSheet(f"color: {COLORS['accent_blue'].name()}; font-size: 12pt; margin-top: 10px;")
         layout.addWidget(status_title)
         
         status_layout = QHBoxLayout()
@@ -535,9 +660,15 @@ class MainWindow(QMainWindow):
         self.temp_gauge.max_value = 100.0  # Temperature in Celsius
         self.mem_gauge.set_value(telemetry_data["memory_usage"])
         
-        # Update LiDAR status
+        # Update LiDAR status and frequency
         lidar_status = SensorStatus(lidar_data["status"])
         self.lidar_indicator.set_status(lidar_status)
+        
+        if "scan_rate" in lidar_data:
+            freq = lidar_data["scan_rate"]
+            self.lidar_freq_label.setText(f"LiDAR Frequency: {freq:.1f} Hz")
+        else:
+            self.lidar_freq_label.setText("LiDAR Frequency: -- Hz")
         
     def add_decision(self, decision: DecisionLog):
         """Add decision to feed"""
@@ -573,10 +704,34 @@ class MainWindow(QMainWindow):
         """Update mission timer display"""
         if self.mission_start_time:
             elapsed = time.time() - self.mission_start_time
-            hours = int(elapsed // 3600)
-            minutes = int((elapsed % 3600) // 60)
+            minutes = int(elapsed // 60)
             seconds = int(elapsed % 60)
-            self.mission_timer_label.setText(f"Mission Time: {hours:02d}:{minutes:02d}:{seconds:02d}")
+            self.mission_timer_label.setText(f"Mission Time: {minutes:02d}:{seconds:02d}")
+            
+    def on_heartbeat(self, timestamp: float):
+        """Handle heartbeat received"""
+        if not self.first_heartbeat:
+            self.first_heartbeat = True
+            self.connected = True
+            self.hide_connection_splash()
+            
+    def hide_connection_splash(self):
+        """Hide connection splash screen"""
+        if hasattr(self, 'connection_splash'):
+            self.connection_splash.hide()
+            
+    def on_connection_lost(self):
+        """Handle connection lost"""
+        self.connected = False
+        if hasattr(self, 'connection_lost_overlay'):
+            self.connection_lost_overlay.setGeometry(self.rect())
+            self.connection_lost_overlay.show()
+            
+    def on_connection_restored(self):
+        """Handle connection restored"""
+        self.connected = True
+        if hasattr(self, 'connection_lost_overlay'):
+            self.connection_lost_overlay.hide()
             
     def start_mission(self):
         """Start mission timer"""
@@ -587,6 +742,14 @@ class MainWindow(QMainWindow):
         """Stop mission timer"""
         self.mission_timer.stop()
         
+    def resizeEvent(self, event):
+        """Handle window resize"""
+        super().resizeEvent(event)
+        if hasattr(self, 'connection_splash'):
+            self.connection_splash.setGeometry(self.rect())
+        if hasattr(self, 'connection_lost_overlay'):
+            self.connection_lost_overlay.setGeometry(self.rect())
+            
     def closeEvent(self, event):
         """Handle window close"""
         self.zmq_thread.stop()
@@ -600,6 +763,11 @@ def main():
     parser = argparse.ArgumentParser(description="Rescue Robot GUI Master")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode (no Jetson connection)")
     args = parser.parse_args()
+    
+    # Enable high DPI scaling for Retina/4K displays
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     
     app = QApplication(sys.argv)
     window = MainWindow(mock_mode=args.mock)

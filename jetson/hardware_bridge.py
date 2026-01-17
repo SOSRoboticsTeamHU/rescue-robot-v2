@@ -148,6 +148,11 @@ class HardwareBridge:
         self.landolt_detections: List[LandoltCDetection] = []
         self.slam_updates: List[SLAMMapUpdate] = []
         
+        # Motor lock state (for failsafe)
+        self.motors_locked = False
+        self.last_gui_heartbeat = time.time()
+        self.connection_timeout = 0.3  # 300ms timeout for GUI connection
+        
         # Threads
         self.telemetry_thread: Optional[threading.Thread] = None
         self.watchdog_thread: Optional[threading.Thread] = None
@@ -315,16 +320,41 @@ class HardwareBridge:
             time.sleep(0.1)  # 10 Hz
             
     def _heartbeat_loop(self):
-        """Heartbeat publishing loop"""
+        """Heartbeat publishing loop with connection monitoring"""
         while self.running:
             try:
                 msg = ZMQMessage.create_heartbeat(self.sequence_id)
                 self._publish_message(msg)
                 self.sequence_id += 1
+                
+                # Check for GUI connection timeout (virtual tether)
+                # In a bidirectional setup, we'd receive heartbeats from GUI
+                # For now, we rely on ZMQ connection state
+                # TODO: Implement bidirectional heartbeat check if needed
+                
             except Exception as e:
                 print(f"Heartbeat loop error: {e}")
                 
             time.sleep(HEARTBEAT_INTERVAL)
+            
+    def lock_motors(self):
+        """Lock all motors (emergency stop)"""
+        if not self.motors_locked:
+            self.motors_locked = True
+            print("EMERGENCY: All motors locked")
+            self.set_mode(OperationMode.EMERGENCY_STOP)
+            # TODO: Implement actual motor lock via hardware interface
+            # e.g., ROS2 service call or direct hardware command
+            
+    def unlock_motors(self):
+        """Unlock motors (after connection restored)"""
+        if self.motors_locked:
+            self.motors_locked = False
+            print("Motors unlocked - connection restored")
+            # Only unlock if not in emergency stop from other causes
+            if self.current_mode == OperationMode.EMERGENCY_STOP:
+                self.set_mode(OperationMode.MANUAL)
+            # TODO: Implement actual motor unlock via hardware interface
             
     def _update_mode_time(self):
         """Update autonomous/manual time tracking"""
@@ -408,11 +438,15 @@ class HardwareBridge:
     def record_hazmat(self, label_type: str, confidence: float, image_crop_path: str,
                       slam_coords: List[float]):
         """Record Hazmat detection for mission reporting"""
+        # Ensure path is Path object for cross-platform compatibility
+        crop_path = Path(image_crop_path)
+        crop_path.parent.mkdir(parents=True, exist_ok=True)
+        
         hazmat = HazmatDetection(
             timestamp=time.time(),
             label_type=label_type,
             confidence=confidence,
-            image_crop_path=image_crop_path,
+            image_crop_path=str(crop_path),  # Convert back to string for serialization
             slam_coordinates=slam_coords
         )
         self.hazmat_detections.append(hazmat)
@@ -420,11 +454,15 @@ class HardwareBridge:
     def record_landolt_c(self, orientation: str, confidence: float, image_crop_path: str,
                         slam_coords: List[float]):
         """Record Landolt-C detection for mission reporting"""
+        # Ensure path is Path object for cross-platform compatibility
+        crop_path = Path(image_crop_path)
+        crop_path.parent.mkdir(parents=True, exist_ok=True)
+        
         landolt = LandoltCDetection(
             timestamp=time.time(),
             orientation=orientation,
             confidence=confidence,
-            image_crop_path=image_crop_path,
+            image_crop_path=str(crop_path),  # Convert back to string for serialization
             slam_coordinates=slam_coords
         )
         self.landolt_detections.append(landolt)

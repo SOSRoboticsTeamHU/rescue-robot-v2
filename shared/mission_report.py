@@ -107,9 +107,14 @@ class MissionReportGenerator:
         if not REPORTLAB_AVAILABLE:
             print("ERROR: reportlab not available. Cannot generate PDF.")
             return False
+        
+        # Ensure output_path is a Path object for cross-platform compatibility
+        output_path_obj = Path(output_path)
+        output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        output_path_str = str(output_path_obj)
             
         try:
-            doc = SimpleDocTemplate(output_path, pagesize=letter)
+            doc = SimpleDocTemplate(output_path_str, pagesize=letter)
             story = []
             
             # Define styles
@@ -304,7 +309,7 @@ class MissionReportGenerator:
             
             # Build PDF
             doc.build(story)
-            print(f"PDF report generated: {output_path}")
+            print(f"PDF report generated: {output_path_str}")
             return True
             
         except Exception as e:
