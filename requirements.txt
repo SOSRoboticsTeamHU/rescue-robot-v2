@@ -1,0 +1,34 @@
+# Core dependencies for distributed robotics suite
+
+# GUI (Mac - PyQt6)
+PyQt6>=6.5.0
+PyQt6-OpenGL>=6.5.0
+
+# OpenGL for 3D rendering
+PyOpenGL>=3.1.6
+PyOpenGL-accelerate>=3.1.6
+
+# ZMQ for distributed communication
+pyzmq>=25.0.0
+
+# Hardware monitoring (Jetson)
+jtop>=1.2.0  # Only required on Jetson
+
+# PDF generation for mission reports
+reportlab>=4.0.0
+
+# Image processing (for camera streams)
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# Async utilities
+asyncio>=3.4.3  # Usually included in Python 3.7+
+
+# Optional: For advanced 3D visualization
+# PyOpenGL3>=3.1.6
+# vtk>=9.2.0  # For advanced point cloud visualization
+
+# Development dependencies (optional)
+# pytest>=7.4.0
+# black>=23.7.0
+# flake8>=6.1.0
