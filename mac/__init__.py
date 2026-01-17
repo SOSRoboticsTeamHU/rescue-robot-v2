@@ -1,0 +1,1 @@
+"""Mac GUI components for distributed robotics suite"""
